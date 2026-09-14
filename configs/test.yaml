@@ -1,0 +1,55 @@
+camera_name: "hikrobot"
+exposure_ms: 2
+gain: 16
+vid_pid: 2bdf:0001
+
+# Two cameras must be identified independently. device_index is zero-based
+# among HikRobot cameras with the configured vid_pid. Serial numbers are more
+# stable and should be filled in after checking the SDK enumeration log.
+left_camera:
+  device_index: 0
+  serial_number: ""
+  user_defined_name: ""
+right_camera:
+  device_index: 1
+  serial_number: ""
+  user_defined_name: ""
+
+network_input_size: [640, 480]
+display_enabled: true
+display_size: [640, 480]
+
+# Frames farther apart than this are discarded by the stereo synchronizer.
+sync_queue_size: 8
+sync_max_delta_ms: 8.0
+
+xml_path: "assets/Katrin.xml"
+bin_path: "assets/Katrin.bin"
+device: "CPU"
+
+score_threshold: 0.9
+nms_threshold: 0.4
+
+com_port: "/dev/ttyACM0"
+baud_rate: 115200
+
+# 重投影误差: 0.0734px
+camera_matrix: [2356.3525680639673, 0, 712.79730945437075, 0, 2357.8001316954378, 556.32597083182532, 0, 0, 1]
+distort_coeffs: [-0.051228282056738794, 0.11368323919971665, -9.6177326040434001e-05, -0.00010615461256445927, 0]
+
+# Replace these with the separately calibrated left/right intrinsics and
+# distortion coefficients. The current values are placeholders copied from
+# the original mono-camera calibration.
+left_camera_matrix: [2356.3525680639673, 0, 712.79730945437075, 0, 2357.8001316954378, 556.32597083182532, 0, 0, 1]
+right_camera_matrix: [2356.3525680639673, 0, 712.79730945437075, 0, 2357.8001316954378, 556.32597083182532, 0, 0, 1]
+left_distort_coeffs: [-0.051228282056738794, 0.11368323919971665, -9.6177326040434001e-05, -0.00010615461256445927, 0]
+right_distort_coeffs: [-0.051228282056738794, 0.11368323919971665, -9.6177326040434001e-05, -0.00010615461256445927, 0]
+
+# Ideal parallel-camera model: raw_z = baseline_m / normalized_disparity.
+# range_correction_coeffs is [a0, a1, a2], range = a0+a1*raw_z+a2*raw_z^2.
+baseline_m: 0.12
+disparity_sign: 1.0
+range_correction_coeffs: [0.0, 1.0, 0.0]
+min_normalized_disparity: 0.000001
+min_range_m: 0.1
+max_range_m: 100.0
