@@ -11,7 +11,7 @@ namespace calibration
 struct Options
 {
   cv::Size board_size{11, 8};
-  float square_size_m = 0.025F;
+  float square_size_m = 0.040F;
 };
 
 struct Result

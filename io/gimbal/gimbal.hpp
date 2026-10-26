@@ -15,23 +15,28 @@
 
 namespace io
 {
+// 电控 → 视觉：状态（0x00 空闲/舱门关，0x01 运行/自瞄）+ 当前镖序号
+// + 目标（0x00 前哨站 / 0x01 基地）+ roll 轴偏角（顺时针为正）
 struct __attribute__((packed)) GimbalToVision
 {
   uint8_t head[2] = {'E', 'C'};
-  uint8_t state; 
+  uint8_t state;
+  uint8_t dart_index = 0;
+  uint8_t target = 1;  // 0=前哨站，1=基地
+  float roll_rad = 0.0f;
   uint16_t crc16;
 };
 
-static_assert(sizeof(GimbalToVision) == 5); 
+static_assert(sizeof(GimbalToVision) == 11);
+
 struct __attribute__((packed)) VisionToGimbal
 {
   uint8_t head[2] = {'V', 'C'};
-  uint8_t status = 0;
-  float yaw_offset = 0.0f;
-  float distance_m = -1.0f;
-  uint16_t crc16 = 0;
+  uint8_t control_state = 0;
+  float energy_j = 0.0f;
+  uint16_t crc16;
 };
-static_assert(sizeof(VisionToGimbal) == 13);
+static_assert(sizeof(VisionToGimbal) == 9);
 
 enum class GimbalMode
 {
@@ -49,6 +54,9 @@ public:
 
   GimbalMode mode() const;
   std::string str(GimbalMode mode) const;
+  float roll_rad() const;
+  uint8_t dart_index() const;
+  uint8_t target() const;  // 0=前哨站，1=基地
 
   void send(io::VisionToGimbal VisionToGimbal);
 

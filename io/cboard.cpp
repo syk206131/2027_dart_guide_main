@@ -7,7 +7,6 @@ namespace io
 {
 CBoard::CBoard(const std::string & config_path)
 : mode(Mode::idle),
-  shoot_mode(ShootMode::left_shoot),
   bullet_speed(0),
   queue_(5000),
   can_(read_yaml(config_path), std::bind(&CBoard::callback, this, std::placeholders::_1))
@@ -48,15 +47,13 @@ void CBoard::send(Command command) const
 {
   can_frame frame;
   frame.can_id = send_canid_;
-  frame.can_dlc = 8;
+  frame.can_dlc = 6;
   frame.data[0] = (command.control) ? 1 : 0;
   frame.data[1] = (command.shoot) ? 1 : 0;
   frame.data[2] = (int16_t)(command.yaw * 1e4) >> 8;
   frame.data[3] = (int16_t)(command.yaw * 1e4);
   frame.data[4] = (int16_t)(command.pitch * 1e4) >> 8;
   frame.data[5] = (int16_t)(command.pitch * 1e4);
-  frame.data[6] = (int16_t)(command.horizon_distance * 1e4) >> 8;
-  frame.data[7] = (int16_t)(command.horizon_distance * 1e4);
 
   try {
     can_.write(&frame);
@@ -86,8 +83,6 @@ void CBoard::callback(const can_frame & frame)
   else if (frame.can_id == bullet_speed_canid_) {
     bullet_speed = (int16_t)(frame.data[0] << 8 | frame.data[1]) / 1e2;
     mode = Mode(frame.data[2]);
-    shoot_mode = ShootMode(frame.data[3]);
-    ft_angle = (int16_t)(frame.data[4] << 8 | frame.data[5]) / 1e4;
 
     // 限制日志输出频率为1Hz
     static auto last_log_time = std::chrono::steady_clock::time_point::min();
@@ -95,8 +90,7 @@ void CBoard::callback(const can_frame & frame)
 
     if (bullet_speed > 0 && tools::delta_time(now, last_log_time) >= 1.0) {
       tools::logger()->info(
-        "[CBoard] Bullet speed: {:.2f} m/s, Mode: {}, Shoot mode: {}, FT angle: {:.2f} rad",
-        bullet_speed, MODES[mode], SHOOT_MODES[shoot_mode], ft_angle);
+        "[CBoard] Bullet speed: {:.2f} m/s, Mode: {}", bullet_speed, MODES[mode]);
       last_log_time = now;
     }
   }

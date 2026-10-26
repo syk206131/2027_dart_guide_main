@@ -1,5 +1,6 @@
 #include "io/camera.hpp"
 #include "io/gimbal/gimbal.hpp"
+#include "tasks/dart/dart_calculator.hpp"
 #include "tasks/light_detect/Detect.hpp"
 #include "tasks/stereo/stereo_range.hpp"
 #include "tools/exiter.hpp"
@@ -27,27 +28,49 @@ struct TargetObservation
 {
   bool valid = false;
   double score = 0.0;
+  double area = 0.0;
   cv::Rect2d box;
   cv::Point2d center;
 };
 
 TargetObservation detect_target(
-  LightDetect & detector, cv::Mat & image, const cv::Size2d & network_size, bool & startup,
-  const cv::Scalar & hsv_lower, const cv::Scalar & hsv_upper)
+  LightDetect & detector, cv::Mat & image,
+  const cv::Scalar & hsv_lower, const cv::Scalar & hsv_upper,
+  double dual_target_area_threshold, bool aim_at_outpost)
 {
-  auto lights = detector.detect(image, network_size, 0, startup);
-  startup = false;
+  auto lights = detector.detect(image);
   if (lights.empty()) return {};
 
-  const auto best_it = std::max_element(
-    lights.begin(), lights.end(),
-    [](const auto & left, const auto & right) { return left.score < right.score; });
+  // When one camera sees both guide lights, lock the one matching the target
+  // selected by the gimbal: the base is farther away (26.4m vs 17.2m), so its
+  // light appears SMALLER, while the outpost light appears LARGER. Only lights
+  // above dual_target_area_threshold count as a real second target, so noise
+  // blobs cannot trigger the switch.
+  const LightDetect::Light * best = nullptr;
+  std::vector<const LightDetect::Light *> strong_lights;
+  for (const auto & light : lights) {
+    if (light.area >= dual_target_area_threshold) strong_lights.push_back(&light);
+  }
+  if (strong_lights.size() >= 2) {
+    best = aim_at_outpost
+      ? *std::max_element(
+          strong_lights.begin(), strong_lights.end(),
+          [](const auto * a, const auto * b) { return a->area < b->area; })
+      : *std::min_element(
+          strong_lights.begin(), strong_lights.end(),
+          [](const auto * a, const auto * b) { return a->area < b->area; });
+  } else {
+    best = &*std::max_element(
+      lights.begin(), lights.end(),
+      [](const auto & left, const auto & right) { return left.score < right.score; });
+  }
 
   TargetObservation result;
   result.valid = true;
-  result.score = best_it->score;
-  result.box = best_it->box;
-  result.center = best_it->center_point;
+  result.score = best->score;
+  result.box = best->box;
+  result.center = best->center_point;
+  result.area = best->area;
 
   const cv::Rect image_bounds(0, 0, image.cols, image.rows);
   const cv::Rect2d clipped_box =
@@ -134,14 +157,6 @@ int main()
   const std::string config_path = "configs/test.yaml";
   const auto yaml = tools::load(config_path);
 
-  const auto network_size_values =
-    optional_config<std::vector<int>>(yaml, "network_input_size", {640, 480});
-  if (network_size_values.size() != 2 || network_size_values[0] <= 0 || network_size_values[1] <= 0) {
-    tools::logger()->error("network_input_size must contain positive [width, height].");
-    return 1;
-  }
-  const cv::Size2d network_size(network_size_values[0], network_size_values[1]);
-
   const auto green_lower_values =
     optional_config<std::vector<int>>(yaml, "green_lower", {35, 100, 100});
   const auto green_upper_values =
@@ -180,12 +195,33 @@ int main()
     return 1;
   }
 
+  // Dual-target decision thresholds (outpost ~17.25m on the left, base
+  // ~26.45m on the right; the dart aims at the target selected by the gimbal).
+  const auto dual_target_area_threshold =
+    optional_config<double>(yaml, "dual_target_area_threshold", 30.0);
+  const auto stereo_area_diff_threshold =
+    optional_config<double>(yaml, "stereo_area_diff_threshold", 100.0);
+  const auto outpost_range_m = optional_config<double>(yaml, "outpost_range_m", 17.25);
+  const auto base_range_m = optional_config<double>(yaml, "base_range_m", 26.45);
+
+  // 瞄准判定（视觉侧）：|yaw偏移+roll补偿| 连续 aim_consecutive_frames 帧小于
+  // aim_deadband_px 时判定瞄准完成（control_state=0）
+  const auto aim_deadband_px = optional_config<double>(yaml, "aim_deadband_px", 3.0);
+  const auto aim_consecutive_frames =
+    optional_config<int>(yaml, "aim_consecutive_frames", 25);
+  if (aim_deadband_px <= 0.0 || aim_consecutive_frames <= 0) {
+    tools::logger()->error("aim_deadband_px and aim_consecutive_frames must be positive.");
+    return 1;
+  }
+
   io::Camera left_camera(config_path, "left_camera");
   io::Camera right_camera(config_path, "right_camera");
   LightDetect left_detector(config_path);
   LightDetect right_detector(config_path);
   StereoRangeEstimator range_estimator(config_path);
-  io::Gimbal gimbal(config_path);
+  DartCalculator dart_calculator(config_path);
+  // 临时注释：串口通信未联调，暂不连接电控（恢复时取消本行及下方各处"临时"注释）
+  // io::Gimbal gimbal(config_path);
   tools::Exiter exiter;
 
   std::atomic<bool> capture_quit{false};
@@ -219,29 +255,65 @@ int main()
   std::thread right_capture_thread(
     capture_loop, std::ref(right_camera), tools::StereoCameraSide::RIGHT, "right");
 
-  bool left_detector_startup = true;
-  bool right_detector_startup = true;
-
   if (display_enabled) cv::namedWindow("Stereo Dart Guide", cv::WINDOW_AUTOSIZE);
+
+  // Processed-pair frame rate, updated once per second.
+  //显示帧率
+  std::size_t fps_frame_count = 0;
+  double fps_value = 0.0;
+  auto fps_last = std::chrono::steady_clock::now();
+  //显示帧率
 
   // The main thread is the stereo processing thread: pair frames, detect the
   // guide light in both views, calculate steering data, and triangulate range.
+  // 瞄准状态机：连续 aim_consecutive_frames 帧 |补偿后 yaw 偏移| < aim_deadband_px
+  // 时判定瞄准完成。任何搜索/丢目标/空闲帧都会清零计数。
+  int aim_consecutive_count = 0;
   while (!exiter.exit()) {
     tools::StereoFramePair frame_pair;
     if (!stereo_queue.pop(frame_pair)) break;
 
+    //显示帧率
+    ++fps_frame_count;
+    const auto fps_now = std::chrono::steady_clock::now();
+    const double fps_elapsed =
+      std::chrono::duration<double>(fps_now - fps_last).count();
+    if (fps_elapsed >= 1.0) {
+      fps_value = static_cast<double>(fps_frame_count) / fps_elapsed;
+      fps_frame_count = 0;
+      fps_last = fps_now;
+      std::printf("[fps] %.1f\n", fps_value);
+    }
+    //显示帧率
+
+    io::VisionToGimbal send_data;  // 默认 control_state=0, energy_j=0
+
+    // 电控模式门控：仅 RUNNING（0x01，舱门开启）时自瞄；IDLE/ERROR 保持停机
+    // 临时：无电控连接，强制进入自瞄（原：gimbal.mode() == io::GimbalMode::RUNNING）
+    const bool auto_aim_enabled = true;
+
+    // 目标选择（电控下发，0=前哨站 / 1=基地）：前哨站约 17.25m、位于视野偏左，
+    // 基地约 26.45m、位于视野偏右。目标决定：同屏双灯锁大/锁小、锁定错误目标时
+    // 的搜索方向、丢目标时的扫描方向；距离/高度/能量拟合均为距离的函数，两目标
+    // 通用无需区分。
+    // 临时：无电控连接，目标占位为基地（恢复通信后改为 gimbal.target() == 0）
+    const bool aim_at_outpost = false;
+    // 搜错目标/丢目标时的转向：前哨站在左（1）、基地在右（2）
+    const uint8_t search_state = aim_at_outpost ? 1 : 2;
+    const char * search_dir = aim_at_outpost ? "LEFT" : "RIGHT";
+    const char * target_name = aim_at_outpost ? "outpost" : "base";
+
     auto left_observation = detect_target(
-      left_detector, frame_pair.left.image, network_size, left_detector_startup,
-      hsv_lower, hsv_upper);
+      left_detector, frame_pair.left.image, hsv_lower, hsv_upper,
+      dual_target_area_threshold, aim_at_outpost);
     auto right_observation = detect_target(
-      right_detector, frame_pair.right.image, network_size, right_detector_startup,
-      hsv_lower, hsv_upper);
+      right_detector, frame_pair.right.image, hsv_lower, hsv_upper,
+      dual_target_area_threshold, aim_at_outpost);
 
-    io::VisionToGimbal send_data;
-    send_data.yaw_offset = 0.0f;
-    send_data.distance_m = -1.0f;
-
-    if (left_observation.valid && right_observation.valid) {
+    if (!auto_aim_enabled) {
+      aim_consecutive_count = 0;
+    }
+    else if (left_observation.valid && right_observation.valid) {
       const double left_yaw_offset =
         left_observation.center.x - range_estimator.left_principal_x();
       const double right_yaw_offset =
@@ -250,21 +322,86 @@ int main()
       const auto range = range_estimator.estimate(
         left_observation.center, right_observation.center);
 
-      // Bit 0: both guide lights detected. Bit 1: range passed validity checks.
-      send_data.status = 0x01;
-      if (range.valid) {
-        send_data.status |= 0x02;
-        send_data.distance_m = static_cast<float>(range.range_m);
-      }
-      send_data.yaw_offset = static_cast<float>(yaw_offset);
+      // 左右面积差过大说明锁定了不同目标（一侧前哨/一侧基地），朝目标侧搜索
+      const bool area_mismatch =
+        std::fabs(left_observation.area - right_observation.area) >
+        stereo_area_diff_threshold;
+      // 测距更接近非目标工况点说明锁定了错误目标，朝目标侧搜索
+      const double target_range_m = aim_at_outpost ? outpost_range_m : base_range_m;
+      const double other_range_m = aim_at_outpost ? base_range_m : outpost_range_m;
+      const bool locked_wrong_target =
+        range.valid &&
+        std::fabs(range.range_m - target_range_m) >
+          std::fabs(range.range_m - other_range_m);
 
+      if (area_mismatch) {
+        aim_consecutive_count = 0;
+        send_data.control_state = search_state;
+        std::printf(
+          "target mismatch: left area %.1f vs right area %.1f | steer %s for %s\n",
+          left_observation.area, right_observation.area, search_dir, target_name);
+      }
+      else if (locked_wrong_target) {
+        aim_consecutive_count = 0;
+        send_data.control_state = search_state;
+        std::printf(
+          "locked on wrong target: range %.3f m (raw %.3f) | steer %s for %s\n",
+          range.range_m, range.raw_range_m, search_dir, target_name);
+      }
+      else {
+        // DartCalculator：距离修正、高度解算、roll→yaw 瞄准点、能量计算
+        // 临时：无电控数据，roll/dart_index 用占位值（原：gimbal.roll_rad(), gimbal.dart_index()）
+        const auto comp = dart_calculator.compute(
+          range, left_observation.center, right_observation.center, 0.0f, 0);
+
+        send_data.energy_j = comp.energy_j;
+
+        // 瞄准判定：瞄准点 = c0 + c1*roll + c2*roll^2（像素，DartCalculator 给出）。
+        // 瞄准误差 = 当前 yaw 偏移 - 瞄准点；|误差| 连续 N 帧 < 死区 → control_state=0。
+        // 例：roll 顺时针 2°，弹着偏右，需云台向左补 → 瞄准点为正值（目标需偏右），
+        // yaw_offset 收敛到该正值即瞄准完成。
+        const double aim_error = yaw_offset - comp.yaw_offset_px;
+        if (std::fabs(aim_error) < aim_deadband_px) {
+          if (++aim_consecutive_count >= aim_consecutive_frames) {
+            send_data.control_state = 0;  // 瞄准完成
+          }
+          else {
+            // 死区内但未收敛：给方向，电控可减速精调
+            send_data.control_state = (aim_error > 0) ? 2 : 1;
+          }
+        }
+        else {
+          aim_consecutive_count = 0;
+          send_data.control_state = (aim_error > 0) ? 2 : 1;
+        }
+
+        std::printf(
+          "L %.2f R %.2f | avg %.2f err %.2f | roll %.3f dart %u | D %.3f H %.3f E %.2f J | "
+          "aim %d/%d -> state %u%s\n",
+          left_yaw_offset, right_yaw_offset, yaw_offset, aim_error,
+          0.0, 0,  // 临时：原 gimbal.roll_rad() / gimbal.dart_index()
+          static_cast<double>(comp.distance_m), static_cast<double>(comp.height_m),
+          static_cast<double>(comp.energy_j), aim_consecutive_count,
+          aim_consecutive_frames, send_data.control_state,
+          comp.valid ? "" : " (range invalid)");
+      }
+    }
+    else if (left_observation.valid || right_observation.valid) {
+      // 单路锁定：目标在该相机视场边缘，朝对应方向粗对准，不计能量
+      aim_consecutive_count = 0;
+      send_data.control_state = left_observation.valid ? 1 : 2;
       std::printf(
-        "L %.2f R %.2f | average %.2f px | range %.3f m%s\n",
-        left_yaw_offset, right_yaw_offset, yaw_offset,
-        range.range_m, range.valid ? "" : " (invalid)");
+        "single-side target: %s camera only | steer %s\n",
+        left_observation.valid ? "left" : "right",
+        left_observation.valid ? "LEFT" : "RIGHT");
+    }
+    else {
+      // 双路均未锁定：朝目标侧扫描搜索（前哨站在左、基地在右），收敛计数清零
+      aim_consecutive_count = 0;
+      send_data.control_state = search_state;
     }
 
-    gimbal.send(send_data);
+    // 临时注释：串口通信未联调（原：gimbal.send(send_data);）
 
     if (display_enabled) {
       const double left_yaw_offset = left_observation.valid
@@ -279,6 +416,13 @@ int main()
         frame_pair.right.image, right_observation, right_yaw_offset, "RIGHT", display_size);
       cv::Mat stereo_display;
       cv::hconcat(left_display, right_display, stereo_display);
+      //显示帧率
+      std::ostringstream fps_text;
+      fps_text << "FPS: " << std::fixed << std::setprecision(1) << fps_value;
+      cv::putText(
+        stereo_display, fps_text.str(), cv::Point(10, stereo_display.rows - 10),
+        cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(0, 255, 255), 2);
+      //显示帧率
       cv::imshow("Stereo Dart Guide", stereo_display);
       if (cv::waitKey(1) == 'q') break;
     }

@@ -42,6 +42,24 @@ GimbalMode Gimbal::mode() const
   return mode_;
 }
 
+float Gimbal::roll_rad() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return rx_data_.roll_rad;
+}
+
+uint8_t Gimbal::dart_index() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return rx_data_.dart_index;
+}
+
+uint8_t Gimbal::target() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return rx_data_.target;
+}
+
 std::string Gimbal::str(GimbalMode mode) const
 {
   switch (mode) {
@@ -116,10 +134,13 @@ void Gimbal::read_thread()
     std::lock_guard<std::mutex> lock(mutex_);
     switch (rx_data_.state) {
       case 0x00:
-        mode_ = GimbalMode::ERROR;
+        mode_ = GimbalMode::IDLE;  // 空闲：舱门关闭，视觉不自瞄
         break;
       case 0x01:
         mode_ = GimbalMode::RUNNING;
+        break;
+      case 0x02:
+        mode_ = GimbalMode::ERROR;
         break;
       default:
         mode_ = GimbalMode::IDLE;

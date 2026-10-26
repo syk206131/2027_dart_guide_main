@@ -1,34 +1,38 @@
 camera_name: "hikrobot"
 exposure_ms: 2
-gain: 16
-vid_pid: 2bdf:0001
+gain: 8
 
-# Two cameras must be identified independently. device_index is zero-based
-# among HikRobot cameras with the configured vid_pid. Serial numbers are more
-# stable and should be filled in after checking the SDK enumeration log.
+vid_pid: 2bdf:0001
+width: 1440
+height: 1080
+
 left_camera:
-  device_index: 0
-  serial_number: ""
+  device_index: -1
+  serial_number: "DA1830826"
   user_defined_name: ""
 right_camera:
-  device_index: 1
-  serial_number: ""
+  device_index: -1
+  serial_number: "DA4873204"
   user_defined_name: ""
 
-network_input_size: [640, 480]
-display_enabled: true
+display_enabled: True
 display_size: [640, 480]
 
-# Frames farther apart than this are discarded by the stereo synchronizer.
-sync_queue_size: 8
-sync_max_delta_ms: 8.0
+sync_queue_size: 30
+sync_max_delta_ms: 8.0  #双目测距双线程参数
 
-xml_path: "assets/Katrin.xml"
-bin_path: "assets/Katrin.bin"
-device: "CPU"
+green_lower: [35, 100, 100]      # HSV 下限 [H, S, V]
+green_upper: [85, 255, 255]      # HSV 上限 [H, S, V]
+min_light_area: 5.0             # 最小轮廓面积 
+max_light_area_ratio: 0.05       # 最大轮廓面积占整帧比例
+min_circularity: 0.6             # 最小圆度
+min_aspect_ratio: 0.6            # 外接矩形宽/高最小值
+max_aspect_ratio: 1.67           # 外接矩形宽/高最大值
 
-score_threshold: 0.9
-nms_threshold: 0.4
+dual_target_area_threshold: 30.0  # 最小轮廓面积
+stereo_area_diff_threshold: 100.0  # 两路锁定目标的面积差超过该值，判断为不同目标
+outpost_range_m: 17.25
+base_range_m: 26.45
 
 com_port: "/dev/ttyACM0"
 baud_rate: 115200
@@ -37,19 +41,64 @@ baud_rate: 115200
 camera_matrix: [2356.3525680639673, 0, 712.79730945437075, 0, 2357.8001316954378, 556.32597083182532, 0, 0, 1]
 distort_coeffs: [-0.051228282056738794, 0.11368323919971665, -9.6177326040434001e-05, -0.00010615461256445927, 0]
 
-# Replace these with the separately calibrated left/right intrinsics and
-# distortion coefficients. The current values are placeholders copied from
-# the original mono-camera calibration.
-left_camera_matrix: [2356.3525680639673, 0, 712.79730945437075, 0, 2357.8001316954378, 556.32597083182532, 0, 0, 1]
-right_camera_matrix: [2356.3525680639673, 0, 712.79730945437075, 0, 2357.8001316954378, 556.32597083182532, 0, 0, 1]
-left_distort_coeffs: [-0.051228282056738794, 0.11368323919971665, -9.6177326040434001e-05, -0.00010615461256445927, 0]
-right_distort_coeffs: [-0.051228282056738794, 0.11368323919971665, -9.6177326040434001e-05, -0.00010615461256445927, 0]
+# 左相机 33 视图 RMS 0.0792px，右相机 31 视图 RMS 0.0513px
+left_camera_matrix: [2382.9054639198598, 0, 692.18928831621201, 0, 2384.3128391347113, 533.09296849368502, 0, 0, 1]
+right_camera_matrix: [2364.8144438919003, 0, 717.723732846232, 0, 2365.1874626684171, 569.89640576800093, 0, 0, 1]
+left_distort_coeffs: [-0.051216339243897291, 0.11909849600656747, -0.0017695260716292841, 0.00068099421153633845, 0.14314180418047939]
+right_distort_coeffs: [-0.05160885132226517, 0.053287343593444531, 0.0010829006530827445, -0.00042132964608933868, 0.50392174749683594]
 
 # Ideal parallel-camera model: raw_z = baseline_m / normalized_disparity.
 # range_correction_coeffs is [a0, a1, a2], range = a0+a1*raw_z+a2*raw_z^2.
+# 标定流程（山理工式）：保持下方 [0,1,0] 直通 -> 相机放水平、引导灯与相机等高，
+# 15-30m 每 0.5m 记一组，前哨(≈17.25m)/基地(≈26.45m)工况点附近加密（±1m 内 0.125~0.25m
+# 一档），记录（打印的 raw 值, 激光测距实际值）-> MATLAB 二次拟合 -> 填回系数。
+# 注意：只对本次装配有效，重新装配/换相机后必须重标；只在标定区间内插有效。
 baseline_m: 0.12
 disparity_sign: 1.0
-range_correction_coeffs: [0.0, 1.0, 0.0]
+range_correction_coeffs: [0.0, 1.0, 0.0]  # 占位：直通未修正
 min_normalized_disparity: 0.000001
 min_range_m: 0.1
 max_range_m: 100.0
+
+# roll→yaw 瞄准点拟合系数（占位）：aim_point_px = c0 + c1*roll_rad + c2*roll_rad^2
+# 语义：roll 为 roll_rad 时，yaw_offset 收敛到 aim_point_px 才判定瞄准（即瞄准误差
+# = yaw_offset - aim_point_px）。标定方法：① 调平试射定零点，记录此时 yaw_offset 读数
+# 作为 (roll_0, aim_0)；② 变 roll 试射，调 yaw 至落点回正，记录当时打印的 avg 值作为
+# (roll, aim_point)；③ MATLAB 拟合。roll 单位 rad（顺时针为正，电控发送），瞄准点单位像素。
+roll_yaw_compensation_coeffs: [0.0, 0.0, 0.0]
+
+# ── 每发镖体质量（kg，占位） ──
+# 能量公式动能项 ∝ 质量，逐发称量填入。dart_index 由电控通过串口发送（0~3）。
+dart_masses: [0.25, 0.25, 0.25, 0.25]
+
+# ── 高度解算系数（占位） ──
+# H = b0 + b1*D + b2*D*v_bar（单位：m；v_bar=(v-cy)/fy 本身即视线夹角的正切，精确线性关系）
+# v_bar = 0.5 * ( (v_l-cy_l)/fy_l + (v_r-cy_r)/fy_r )，为归一化 y 偏移平均值。
+# 标定流程：固定镖架、以出镖点为高度零点，引导灯摆多档距离×高度（覆盖前哨/基地工况），
+# 每档先闭环瞄准收敛（|x偏差|<3px），记录 (激光实测D, 左右图质心y像素, H_实际) → MATLAB 拟合 → 填回。
+# 注意：瞄准时 roll 对 y 的耦合项 u*sin(roll) 在收敛后自动消失，未收敛时 H 不可信。
+# 相机水平安装、左右对称于镖架中心：b1 应≈0，b0≈相机光心与出镖口高差（尺量交叉验证）。
+height_coeffs: [0.0, 0.0, 0.0]
+
+# ── 能量系数（占位）：视觉→电控直接发送所需总动能 E（滑台+镖体，单位 J） ──
+# E = a·(m镖+m滑台)·(g/4)·S²/(cos²θ_eff·(S·tanθ_eff − Δh)) + b + c·roll²
+# 推导：弹道需求 v₀² = g·S²/(2cos²θ_eff·(S·tanθ_eff − Δh))，总动能 E_kin = ½·m·v₀²。
+# θ_eff = arcsin(sinθ·cos roll)：roll 对弹道几何的修正（自动带入）。
+# a 无量纲（理想值≈1，拟合自动吸收弹簧效率与比例损耗），b = 固定损耗（J），
+# c·roll² 吸收 roll 引起的摩擦变化（J/rad²，偶函数，左右对称）。
+# θ = launch_theta_rad（出射仰角设计值，弧度），g = gravity（当地重力加速度）。
+# 动能分配：弹簧先推动（镖+滑台）总质量，分离瞬间同速，镖带走 m镖/m总 份额。
+# 弹簧压缩量换算（E_弹簧 = E/效率，x = sqrt(2·E_弹簧/k)）由电控完成，视觉不涉及 k。
+# 标定：变靶位（距离×高度）× 变 roll 试射至命中装甲板，记录样本 → MATLAB 解 a,b,c。
+# 自检：拟合出的 a 应接近 1（略大），若离谱说明样本数据或公式骨架有问题，先查再填。
+# 注意：theta 零偏会留系统残差，拟合后按 S 分组检查残差趋势，必要时 theta 也参与标定。
+launch_theta_rad: 0.0
+gravity: 9.7877
+sled_mass_kg: 0.0
+energy_coeffs: [0.0, 0.0, 0.0]
+
+# ── 瞄准判定（视觉侧） ──
+# |yaw偏移 − roll瞄准点| 连续 aim_consecutive_frames 帧小于 aim_deadband_px 时，
+# 判定瞄准完成（control_state=0），否则按偏移方向给 1(左)/2(右)。
+aim_deadband_px: 3.0
+aim_consecutive_frames: 25

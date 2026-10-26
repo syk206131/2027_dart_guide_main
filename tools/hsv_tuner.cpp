@@ -17,8 +17,10 @@ int main(int argc, char **argv) {
     double exposure = tools::read<double>(yaml, "exposure_ms");
     double gain = tools::read<double>(yaml, "gain");
     std::string vid_pid = tools::read<std::string>(yaml, "vid_pid");
+    int width = yaml["width"] ? yaml["width"].as<int>() : -1;
+    int height = yaml["height"] ? yaml["height"].as<int>() : -1;
 
-    io::HikRobot camera(exposure, gain, vid_pid);
+    io::HikRobot camera(exposure, gain, vid_pid, width, height);
 
     cv::Mat img;
     std::chrono::steady_clock::time_point ts;

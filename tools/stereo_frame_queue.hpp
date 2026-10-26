@@ -86,14 +86,16 @@ private:
       const auto delta = left_.front().timestamp - right_.front().timestamp;
 
       if (delta > max_delta_) {
-        // The left frame is too old to match the current right frame.
-        left_.pop_front();
+        // The left front is newer than the right front by more than max_delta,
+        // so the stale right frame can never match; drop it.
+        right_.pop_front();
         continue;
       }
 
       if (delta < -max_delta_) {
-        // The right frame is too old to match the current left frame.
-        right_.pop_front();
+        // The left front is older than the right front by more than max_delta,
+        // so the stale left frame can never match; drop it.
+        left_.pop_front();
         continue;
       }
 

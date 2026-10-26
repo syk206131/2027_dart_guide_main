@@ -42,10 +42,12 @@ void free_image_buffer(void * handle, MV_FRAME_OUT & raw, bool acquired)
 }  // namespace
 
 HikRobot::HikRobot(
-  double exposure_ms, double gain, const std::string & vid_pid, int device_index,
-  const std::string & serial_number, const std::string & user_defined_name)
+  double exposure_ms, double gain, const std::string & vid_pid, int width, int height,
+  int device_index, const std::string & serial_number, const std::string & user_defined_name)
 : exposure_us_(exposure_ms * 1e3),
   gain_(gain),
+  width_(width),
+  height_(height),
   daemon_quit_(false),
   handle_(nullptr),
   capturing_(false),
@@ -185,6 +187,9 @@ void HikRobot::capture_start()
     tools::logger()->warn("Not found camera!");
     return;
   }
+  selected_serial_ = device_string(
+    device->SpecialInfo.stUsb3VInfo.chSerialNumber,
+    sizeof(device->SpecialInfo.stUsb3VInfo.chSerialNumber));
 
   ret = MV_CC_CreateHandle(&handle_, device);
   if (ret != MV_OK) {
@@ -200,11 +205,16 @@ void HikRobot::capture_start()
     return;
   }
 
+  set_enum_value("TriggerMode", MV_TRIGGER_MODE_OFF);
   set_enum_value("BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS);
   set_enum_value("ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF);
   set_enum_value("GainAuto", MV_GAIN_MODE_OFF);
   set_float_value("ExposureTime", exposure_us_);
   set_float_value("Gain", gain_);
+  if (width_ > 0 && height_ > 0) {
+    set_int_value("Width", width_);
+    set_int_value("Height", height_);
+  }
   MV_CC_SetFrameRate(handle_, 150);
 
   ret = MV_CC_StartGrabbing(handle_);
@@ -303,6 +313,16 @@ void HikRobot::set_enum_value(const std::string & name, unsigned int value)
   const auto ret = MV_CC_SetEnumValue(handle_, name.c_str(), value);
   if (ret != MV_OK) {
     tools::logger()->warn("MV_CC_SetEnumValue(\"{}\", {}) failed: {:#x}", name, value, ret);
+  }
+}
+
+void HikRobot::set_int_value(const std::string & name, int value)
+{
+  if (handle_ == nullptr) return;
+
+  const auto ret = MV_CC_SetIntValue(handle_, name.c_str(), value);
+  if (ret != MV_OK) {
+    tools::logger()->warn("MV_CC_SetIntValue(\"{}\", {}) failed: {:#x}", name, value, ret);
   }
 }
 

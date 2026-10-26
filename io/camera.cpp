@@ -32,6 +32,8 @@ Camera::Camera(const std::string & config_path, const std::string & camera_role)
   const auto gain = read_option("gain", 16.0);
   const auto gamma = read_option("gamma", 1.0);
   const auto vid_pid = read_option("vid_pid", std::string(""));
+  const auto width = read_option("width", -1);
+  const auto height = read_option("height", -1);
   const auto device_index = read_option("device_index", -1);
   const auto serial_number = read_option("serial_number", std::string(""));
   const auto user_defined_name = read_option("user_defined_name", std::string(""));
@@ -42,7 +44,8 @@ Camera::Camera(const std::string & config_path, const std::string & camera_role)
 
   else if (camera_name == "hikrobot") {
     camera_ = std::make_unique<HikRobot>(
-      exposure_ms, gain, vid_pid, device_index, serial_number, user_defined_name);
+      exposure_ms, gain, vid_pid, width, height, device_index, serial_number,
+      user_defined_name);
   }
 
   else {
@@ -58,6 +61,11 @@ bool Camera::read(cv::Mat & img, std::chrono::steady_clock::time_point & timesta
 void Camera::stop()
 {
   if (camera_) camera_->stop();
+}
+
+std::string Camera::serial() const
+{
+  return camera_ ? camera_->serial() : "";
 }
 
 }  // namespace io
