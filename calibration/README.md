@@ -1,12 +1,13 @@
 # calibration
 
-相机标定工具集，包含三个可执行文件和一个静态库：
+相机标定工具集，包含四个可执行文件和一个静态库：
 
 | 工具 | 输入 | 输出 |
 |---|---|---|
 | `calibration_tool` | 单相机棋盘格图片目录 | 单相机内参 + 畸变 yaml |
 | `stereo_capture` | 双相机实时画面（空格触发） | 左右同步图对（BMP） |
 | `stereo_calibration_tool` | 同步图对目录 + 单目内参 | R/T、baseline、相对倾角 yaml |
+| `align_tool` | 双相机实时画面 + 远点引导灯 | 光轴夹角实时残差（装调用） |
 
 完整标定流程（MVS 设置、拍图要求、结果判读、接入配置）见主仓库
 [README.md 的"标定"章节](../README.md#标定)。
@@ -15,7 +16,7 @@
 
 ```bash
 cmake -S .. -B ../build
-cmake --build ../build --target calibration_tool stereo_capture stereo_calibration_tool -j
+cmake --build ../build --target calibration_tool stereo_capture stereo_calibration_tool align_tool -j
 ```
 
 ## 1. 单目标定 `calibration_tool`
@@ -84,3 +85,22 @@ stereo_epipolar_mean_px / stereo_epipolar_max_px   # 校正后对应点行差
 
 判读：倾角 <0.3°、对极行差 <0.5px 时理想平行模型可直接用；把 `baseline_m`
 填入 `configs/test.yaml` 替换占位值即可。
+
+## 4. 光轴安装对准 `align_tool`
+
+双目标定只能事后评估倾角，装调阶段用本工具实时对准（远点对准法：无穷远点视差为 0，
+光轴平行时同一远点在两图像素坐标相同）：
+
+```bash
+../../build/calibration/align_tool \
+  --config ../configs/test.yaml \
+  --distance 23.5
+```
+
+- **`--distance` 必须填实测值**（默认 20m 仅为占位）：引导灯放 20m 以外，用激光测距
+  实测后传入（±0.3m 精度够用）。20m 处基线视差约 14px，远大于 0.5px 对准预算，不补偿无法判断
+- 画面绿十字为本机质心，红十字为对方质心经视差修正后的投影，**红十字压住绿十字即对准**
+- 以左相机为基准调右相机支架：`|Δu残差|` 滚动均值 < **0.5px** 后锁死；
+  `Δv` 几 px 内即可（垂直夹角对测距影响小）
+- 按键：空格打印统计留档、`r` 清零重计（动过支架后按）、`q` / ESC 退出
+- 射击振动后建议复验；重新装配或换相机后必须重做
